@@ -5,23 +5,40 @@ import iam = require('@aws-cdk/aws-iam');
 import route53 = require('@aws-cdk/aws-route53');
 import route53_targets = require('@aws-cdk/aws-route53-targets/lib');
 
+interface Tutorial01InfraStackProps extends cdk.StackProps {
+  domain: string;
+  project: string;
+  issue: string;
+  owner: string;
+  certificate_arn: {[key: string]: string};
+  logbucket_name: string;
+  webacl_id: string;
+}
 
-export class Tutorial01Stack extends cdk.Stack {
-  constructor(scope: cdk.Construct, id: string, props?: cdk.StackProps) {
+export class Tutorial01InfraStack extends cdk.Stack {
+  constructor(scope: cdk.Construct, id: string, props: Tutorial01InfraStackProps) {
     super(scope, id, props);
 
-    const envName = this.node.tryGetContext('env');
-    const domainName = this.node.tryGetContext('domain');
+    // const envName = this.node.tryGetContext('env');
+    const envName = process.env.DEPLOY_ENV ? process.env.DEPLOY_ENV : 'dev';
+    const domainName = this.node.tryGetContext('fqdn');
 
-    // Create Bucket
+    // Create Bucket for contents
     const websiteBucket = new s3.Bucket(this, `Tutorial01Infra-s3bucket-${this.stackName}`, {
       bucketName: domainName,
     });
 
+    // Define Bucket for logging
+    const loggingBucket = s3.Bucket.fromBucketName(
+      this,
+      `Tutorial01Infra-loggingbucket-${this.stackName}`,
+      props.logbucket_name
+    );
+
     // Create CloudFront Origin Access Identity
-    const OAI = new cf.CfnCloudFrontOriginAccessIdentity(this, `identity-${this.stackName}`,{
+    const OAI = new cf.CfnCloudFrontOriginAccessIdentity(this, `Tutorial01Infra-identity-${this.stackName}`,{
       cloudFrontOriginAccessIdentityConfig:{
-        comment: `Tutorial01Infra-${this.stackName}`
+        comment: `Tutorial01Infra-identity-${this.stackName}`
       }
     });
 
@@ -44,24 +61,32 @@ export class Tutorial01Stack extends cdk.Stack {
         }
       ],
       aliasConfiguration: {
-        // ここは決め打ちごめんなさい
-        acmCertRef: 'arn:aws:acm:us-east-1:01234567891:certificate/xxxxxxx-xxxx-xxxx-xxxx-xxxxxxxx',
+        acmCertRef: props.certificate_arn[envName],
         names: [domainName],
         sslMethod: cf.SSLMethod.SNI,
         securityPolicy: cf.SecurityPolicyProtocol.TLS_V1_1_2016,
-      }
+      },
+      viewerProtocolPolicy: cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      priceClass: cf.PriceClass.PRICE_CLASS_ALL,
+      loggingConfig: {
+        bucket: loggingBucket,
+        prefix: domainName + '/' 
+      },
+      webACLId: props.webacl_id
     });
 
-    // mydomain.com を決め打ちでごめんなさい
-    const zone = route53.HostedZone.fromLookup(this, 'Zone', { domainName: 'mydomain.com' });
-    new route53.ARecord(this, `Tutorial01Infra-route53-record-${this.stackName}`, {
+    const zone = route53.HostedZone.fromLookup(this, 'Zone', { domainName: props.domain });
+    new route53.ARecord(this, `Distribution-route53-record-${this.stackName}`, {
       recordName: domainName,
       target: route53.AddressRecordTarget.fromAlias(new route53_targets.CloudFrontTarget(distribution)),
       zone
     });
 
     for (let cons of [websiteBucket, distribution]) {
+      cdk.Tag.add(cons, 'Project', props.project);
       cdk.Tag.add(cons, 'Environment', envName);
+      cdk.Tag.add(cons, 'Owner', props.owner);
+      cdk.Tag.add(cons, 'Issue', props.issue);
       cdk.Tag.add(cons, 'Name', domainName);
     }
 
